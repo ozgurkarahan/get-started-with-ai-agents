@@ -2,19 +2,367 @@
 
 ## Table of Contents
 
-- [1. AI Foundry Project Endpoint](#1-ai-foundry-project-endpoint)
-- [2. OpenAI-Compatible API Surface](#2-openai-compatible-api-surface)
-- [3. How This Project Consumes the Agent](#3-how-this-project-consumes-the-agent)
-- [4. Multi-Channel Compatibility](#4-multi-channel-compatibility)
-- [5. A2A Protocol Overview](#5-a2a-protocol-overview)
-- [6. Foundry Agent + A2A: Current State](#6-foundry-agent--a2a-current-state)
-- [7. Exposing a Foundry Agent via A2A + Azure APIM](#7-exposing-a-foundry-agent-via-a2a--azure-apim)
-- [8. End-to-End Architecture](#8-end-to-end-architecture)
+- [1. Azure AI Foundry Resource Hierarchy](#1-azure-ai-foundry-resource-hierarchy)
+- [2. AI Foundry Project Endpoint](#2-ai-foundry-project-endpoint)
+- [3. OpenAI-Compatible API Surface](#3-openai-compatible-api-surface)
+- [4. How This Project Consumes the Agent](#4-how-this-project-consumes-the-agent)
+- [5. Multi-Channel Compatibility](#5-multi-channel-compatibility)
+- [6. A2A Protocol Overview](#6-a2a-protocol-overview)
+- [7. Foundry Agent + A2A: Current State](#7-foundry-agent--a2a-current-state)
+- [8. Exposing a Foundry Agent via A2A + Azure APIM](#8-exposing-a-foundry-agent-via-a2a--azure-apim)
+- [9. End-to-End Architecture](#9-end-to-end-architecture)
 - [Sources](#sources)
 
 ---
 
-## 1. AI Foundry Project Endpoint
+## 1. Azure AI Foundry Resource Hierarchy
+
+### Overview
+
+Azure AI Foundry organizes resources in a hierarchical structure. Understanding this
+hierarchy is essential because the **project endpoint**, **agent**, **model**, and
+**connections** are all scoped within it.
+
+### Complete Resource Tree
+
+```
+Azure Subscription
+│
+└── Resource Group  (rg-<environment>)
+    │
+    ├── Microsoft.CognitiveServices/accounts  (AI Services Account)
+    │   │
+    │   │   The top-level resource. Kind: "AIServices". Hosts model deployments,
+    │   │   connections, and projects. Has its own system-assigned managed identity.
+    │   │   SKU: S0.
+    │   │
+    │   │   Key properties:
+    │   │   - allowProjectManagement: true
+    │   │   - customSubDomainName: <account-name>
+    │   │   - endpoints:
+    │   │       'OpenAI Language Model Instance API' → used by AOAI connection
+    │   │       'AI Foundry API' → used by project endpoint
+    │   │
+    │   ├── /connections/aoai-connection  (Azure OpenAI Connection)
+    │   │       category: AzureOpenAI
+    │   │       authType: AAD (Entra ID)
+    │   │       target: account.endpoints['OpenAI Language Model Instance API']
+    │   │       Points back to the same account's OpenAI endpoint.
+    │   │
+    │   ├── /connections/appinsights-connection  (App Insights Connection)
+    │   │       category: AppInsights
+    │   │       authType: ApiKey
+    │   │       Links telemetry data to Application Insights.
+    │   │
+    │   ├── /connections/storageAccount  (Storage Connection)
+    │   │       category: AzureStorageAccount
+    │   │       authType: AAD (Entra ID)
+    │   │       target: storage account blob endpoint
+    │   │       Used for file uploads (knowledge base documents).
+    │   │
+    │   ├── /deployments/gpt-5-mini  (Chat Model Deployment)
+    │   │       model:
+    │   │         format: OpenAI
+    │   │         name: gpt-5-mini
+    │   │         version: 2024-07-18
+    │   │       sku: GlobalStandard, capacity: 30
+    │   │       This is the LLM that powers the agent.
+    │   │
+    │   ├── /deployments/text-embedding-3-small  (Embedding Model Deployment)
+    │   │       model:
+    │   │         format: OpenAI
+    │   │         name: text-embedding-3-small
+    │   │         version: 1
+    │   │       sku: Standard, capacity: 30
+    │   │       Only deployed when Azure AI Search is enabled (useSearchService=true).
+    │   │       Used by the search skillset for vectorization.
+    │   │
+    │   └── /projects/<project-name>  (AI Foundry Project)
+    │       │
+    │       │   The project is a CHILD resource of the AI Services account.
+    │       │   It has its own system-assigned managed identity.
+    │       │   All agent operations are scoped to this project.
+    │       │
+    │       │   Key output:
+    │       │   - projectEndpoint = properties.endpoints['AI Foundry API']
+    │       │     → https://<account>.services.ai.azure.com/api/projects/<project>
+    │       │   - projectResourceId = /subscriptions/.../accounts/<acct>/projects/<proj>
+    │       │
+    │       └── /connections/search  (AI Search Connection) [optional]
+    │               category: CognitiveSearch
+    │               authType: ApiKey
+    │               target: https://<search>.search.windows.net/
+    │               Only created when Azure AI Search is enabled.
+    │
+    ├── Microsoft.Storage/storageAccounts  (Storage Account)
+    │       Hosts blob containers for document storage.
+    │       Used by:
+    │       - File uploads for agent knowledge base
+    │       - Azure AI Search datasource (indexer reads from here)
+    │
+    ├── Microsoft.Search/searchServices  (Azure AI Search) [optional]
+    │       SKU: basic
+    │       semanticSearch: free
+    │       Only deployed when useSearchService=true.
+    │       Connected to the project via a search connection.
+    │       Has its own system-assigned identity for accessing blob storage.
+    │
+    ├── Microsoft.OperationalInsights/workspaces  (Log Analytics)
+    │       Backend for Application Insights.
+    │
+    ├── Microsoft.Insights/components  (Application Insights) [optional]
+    │       Application performance monitoring and distributed tracing.
+    │       Connected to the AI Services account via appinsights-connection.
+    │
+    ├── Microsoft.App/managedEnvironments  (Container Apps Environment)
+    │       Hosting environment for the container app.
+    │
+    ├── Microsoft.App/containerApps  (Container App - the web application)
+    │       Runs the FastAPI + React app.
+    │       Target port: 50505.
+    │       Uses a user-assigned managed identity for Azure AD auth.
+    │
+    ├── Microsoft.ContainerRegistry/registries  (Container Registry)
+    │       Stores the Docker image built from src/Dockerfile.
+    │
+    └── Microsoft.ManagedIdentity/userAssignedIdentities  (App Identity)
+            Used by the Container App to authenticate to AI Services.
+```
+
+### How Resources Relate to Each Other
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    AI Services Account                               │
+│                    (Microsoft.CognitiveServices/accounts)            │
+│                                                                      │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
+│  │ gpt-5-mini    │  │ text-embed-  │  │  Connections              │  │
+│  │ deployment    │  │ 3-small      │  │  ├── aoai-connection      │  │
+│  │               │  │ deployment   │  │  ├── appinsights-conn     │  │
+│  │ (chat model)  │  │ (embeddings) │  │  └── storageAccount      │  │
+│  └──────┬───────┘  └──────┬───────┘  └──────────────────────────┘  │
+│         │                 │                                          │
+│  ┌──────▼─────────────────▼──────────────────────────────────────┐  │
+│  │              AI Foundry Project                                │  │
+│  │              (child resource of account)                       │  │
+│  │                                                                │  │
+│  │  project endpoint:                                             │  │
+│  │  https://<acct>.services.ai.azure.com/api/projects/<proj>     │  │
+│  │                                                                │  │
+│  │  ┌────────────────────────────────────────────────────────┐   │  │
+│  │  │  AI Agent (created at runtime via SDK)                  │   │  │
+│  │  │                                                         │   │  │
+│  │  │  name: agent-template-assistant                         │   │  │
+│  │  │  model: gpt-5-mini (references the deployment above)    │   │  │
+│  │  │  tools: FileSearchTool OR AzureAISearchAgentTool        │   │  │
+│  │  │  instructions: "Use File Search always with citations"  │   │  │
+│  │  │                                                         │   │  │
+│  │  │  ID format: <agent-name>:<version>                      │   │  │
+│  │  └────────────────────────────────────────────────────────┘   │  │
+│  │                                                                │  │
+│  │  Optional: /connections/search → AI Search service             │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+         │                              │                     │
+         │ AAD auth                     │ AAD auth            │ API key
+         ▼                              ▼                     ▼
+┌────────────────┐            ┌─────────────────┐   ┌────────────────┐
+│ Storage Account │            │  AI Search       │   │ App Insights   │
+│ (blob: docs)    │            │  (index, indexer) │   │ (telemetry)    │
+└────────────────┘            └─────────────────┘   └────────────────┘
+```
+
+### Resource Construction in Bicep (This Project)
+
+The infrastructure is built in layers via Bicep modules:
+
+```
+main.bicep                          (orchestrator)
+  │
+  ├── ai-environment.bicep          (creates all AI resources together)
+  │     │
+  │     ├── storage-account.bicep       → Storage Account
+  │     ├── loganalytics.bicep          → Log Analytics Workspace
+  │     ├── applicationinsights.bicep   → App Insights
+  │     ├── cognitiveservices.bicep     → AI Services Account
+  │     │     │                              + AI Project (child)
+  │     │     │                              + AOAI Connection
+  │     │     │                              + App Insights Connection
+  │     │     │                              + Storage Connection
+  │     │     │                              + Model Deployments
+  │     │     │
+  │     │     └── outputs: projectEndpoint, projectResourceId, ...
+  │     │
+  │     └── search-services.bicep       → AI Search [optional]
+  │           │                              + Search Connection (on project)
+  │           └── outputs: endpoint, searchConnectionId
+  │
+  ├── container-apps.bicep          (Container Apps Environment + Registry)
+  │
+  └── api.bicep                     (Container App + env vars)
+        │
+        └── Injects all config as environment variables:
+              AZURE_EXISTING_AIPROJECT_ENDPOINT
+              AZURE_EXISTING_AGENT_ID
+              AZURE_AI_AGENT_DEPLOYMENT_NAME
+              AZURE_AI_AGENT_NAME
+              ... (17 env vars total)
+```
+
+### Model Deployment Details
+
+The project deploys two models (configured in `infra/main.bicep`):
+
+#### Chat Model (Always deployed)
+
+| Property | Value | Bicep Param |
+|----------|-------|-------------|
+| Name | `gpt-5-mini` | `agentModelName` |
+| Deployment name | `gpt-5-mini` | `agentDeploymentName` |
+| Format | `OpenAI` | `agentModelFormat` |
+| Version | `2024-07-18` | `agentModelVersion` |
+| SKU | `GlobalStandard` | `agentDeploymentSku` |
+| Capacity | `30` (TPM) | `agentDeploymentCapacity` |
+
+This model is referenced by the agent definition at runtime:
+
+```python
+# gunicorn.conf.py - agent creation
+agent = await ai_project.agents.create_version(
+    agent_name=os.environ["AZURE_AI_AGENT_NAME"],     # "agent-template-assistant"
+    definition=PromptAgentDefinition(
+        model=os.environ["AZURE_AI_AGENT_DEPLOYMENT_NAME"],  # "gpt-5-mini"
+        instructions=instructions,
+        tools=tools,
+    ),
+)
+```
+
+#### Embedding Model (Only when AI Search is enabled)
+
+| Property | Value | Bicep Param |
+|----------|-------|-------------|
+| Name | `text-embedding-3-small` | `embedModelName` |
+| Deployment name | `text-embedding-3-small` | `embeddingDeploymentName` |
+| Format | `OpenAI` | `embedModelFormat` |
+| Version | `1` | `embedModelVersion` |
+| SKU | `Standard` | `embedDeploymentSku` |
+| Capacity | `30` (TPM) | `embedDeploymentCapacity` |
+| Dimensions | `100` | `embeddingDeploymentDimensions` |
+
+The embedding model is used by the Azure AI Search skillset to generate vector
+embeddings when indexing documents. It is NOT used directly by the agent.
+
+```python
+# gunicorn.conf.py - embedding client (used by search indexer)
+embedding_client = AsyncAzureOpenAI(
+    azure_endpoint=aoai_connection.target,
+    azure_ad_token_provider=creds.get_token
+)
+search_mgr = SearchIndexManager(
+    model=embedding,                    # "text-embedding-3-small"
+    dimensions=int(os.getenv('AZURE_AI_EMBED_DIMENSIONS', '1536')),  # 100
+    embedding_client=embedding_client
+)
+```
+
+### Region Constraints
+
+Model deployments are region-limited. This project restricts deployment to:
+
+| Region | Code |
+|--------|------|
+| East US | `eastus` |
+| East US 2 | `eastus2` |
+| Sweden Central | `swedencentral` |
+| West US | `westus` |
+| West US 3 | `westus3` |
+
+These are the regions where `gpt-5-mini` supports agent creation via the Foundry
+Agent Service.
+
+### Identity & RBAC
+
+The project uses **three managed identities** with specific role assignments:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  AI Services Account Identity (System-Assigned)                  │
+│  Role: Storage Blob Data Contributor                             │
+│  Purpose: Account-level access to blob storage                   │
+├──────────────────────────────────────────────────────────────────┤
+│  AI Project Identity (System-Assigned)                           │
+│  Roles: Storage Blob Data Contributor + Azure AI User            │
+│  Purpose: Project-level access to storage and AI services        │
+├──────────────────────────────────────────────────────────────────┤
+│  Container App Identity (User-Assigned)                          │
+│  Roles:                                                          │
+│  - Azure AI Developer (on resource group)                        │
+│  - Azure AI User (on resource group)                             │
+│  - Cognitive Services User (on resource group)                   │
+│  - Storage Blob Data Contributor [if search enabled]             │
+│  - Search Index Data Contributor [if search enabled]             │
+│  - Search Index Data Reader [if search enabled]                  │
+│  - Search Service Contributor [if search enabled]                │
+│  - Storage Account Contributor [if search enabled]               │
+│  Purpose: The web app authenticates as this identity to call     │
+│           the AI Foundry Project endpoint via DefaultAzureCredential │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Agent Lifecycle (Runtime vs Infrastructure)
+
+The agent itself is **not an Azure ARM resource** — it is not created by Bicep.
+Instead, it is created at **application runtime** via the SDK:
+
+```
+INFRASTRUCTURE (Bicep/ARM)              RUNTIME (Python SDK)
+─────────────────────────               ────────────────────
+AI Services Account          ─────▶     AIProjectClient(endpoint=...)
+  └── Project                               │
+  └── Model Deployments                     ├── agents.create_version()
+  └── Connections                           │     → creates the agent
+                                            │     → assigns model + tools
+                                            │
+                                            ├── agents.get_version()
+                                            │     → fetches existing agent
+                                            │
+                                            └── get_openai_client()
+                                                  → conversations, responses
+```
+
+The Bicep outputs provide the **agent name** (`AZURE_AI_AGENT_NAME`) and optionally
+an existing **agent ID** (`AZURE_EXISTING_AGENT_ID`), but the agent definition
+(model, instructions, tools) is managed by `gunicorn.conf.py` at startup time.
+
+### Environment Variables Summary
+
+All configuration flows from Bicep outputs → Container App env vars → Python code:
+
+| Env Var | Source | Used By |
+|---------|--------|---------|
+| `AZURE_EXISTING_AIPROJECT_ENDPOINT` | `projectEndpoint` (Bicep output) | `main.py` → `AIProjectClient` |
+| `AZURE_EXISTING_AIPROJECT_RESOURCE_ID` | `projectResourceId` (Bicep output) | `routes.py` → playground URL |
+| `AZURE_EXISTING_AGENT_ID` | `agentID` param or set at runtime | `main.py` → agent fetch |
+| `AZURE_AI_AGENT_NAME` | `agentName` param | `gunicorn.conf.py` → agent creation |
+| `AZURE_AI_AGENT_DEPLOYMENT_NAME` | `agentDeploymentName` param | `gunicorn.conf.py` → model reference |
+| `AZURE_AI_EMBED_DEPLOYMENT_NAME` | `embeddingDeploymentName` param | `gunicorn.conf.py` → search embeddings |
+| `AZURE_AI_EMBED_DIMENSIONS` | `embeddingDeploymentDimensions` param | `gunicorn.conf.py` → vector index |
+| `AZURE_AI_SEARCH_ENDPOINT` | `searchServiceEndpoint` (Bicep output) | `gunicorn.conf.py` → search manager |
+| `AZURE_AI_SEARCH_INDEX_NAME` | `aiSearchIndexName` param | `gunicorn.conf.py` → index name |
+| `SEARCH_CONNECTION_ID` | `searchConnectionId` (Bicep output) | `gunicorn.conf.py` → AI Search tool |
+| `STORAGE_ACCOUNT_RESOURCE_ID` | `storageAccountId` (Bicep output) | `gunicorn.conf.py` → blob connection |
+| `AZURE_BLOB_CONTAINER_NAME` | `blobContainerName` param | `gunicorn.conf.py` → container name |
+| `USE_AZURE_AI_SEARCH_SERVICE` | `useAzureAISearch` param | `gunicorn.conf.py` → tool selection |
+| `AZURE_CLIENT_ID` | Container App identity | `DefaultAzureCredential` |
+| `RUNNING_IN_PRODUCTION` | hardcoded `true` | `main.py` → skip local .env |
+| `ENABLE_AZURE_MONITOR_TRACING` | `enableAzureMonitorTracing` param | `main.py` → telemetry setup |
+
+---
+
+## 2. AI Foundry Project Endpoint
 
 ### What Is It?
 
@@ -96,7 +444,7 @@ async with DefaultAzureCredential() as credential:
 
 ---
 
-## 2. OpenAI-Compatible API Surface
+## 3. OpenAI-Compatible API Surface
 
 ### The Key Design Choice
 
@@ -193,7 +541,7 @@ curl -X POST "$ENDPOINT/responses" \
 
 ---
 
-## 3. How This Project Consumes the Agent
+## 4. How This Project Consumes the Agent
 
 ### Architecture
 
@@ -271,7 +619,7 @@ curl -X POST "$ENDPOINT/responses" \
 
 ---
 
-## 4. Multi-Channel Compatibility
+## 5. Multi-Channel Compatibility
 
 Because the runtime is OpenAI-compatible HTTP, the Foundry agent is inherently
 channel-agnostic. The agent doesn't know what channel is calling it.
@@ -303,7 +651,7 @@ The core agent logic and knowledge base remain the same across all channels.
 
 ---
 
-## 5. A2A Protocol Overview
+## 6. A2A Protocol Overview
 
 ### What Is A2A?
 
@@ -395,7 +743,7 @@ Client                              A2A Server
 
 ---
 
-## 6. Foundry Agent + A2A: Current State
+## 7. Foundry Agent + A2A: Current State
 
 ### Two Directions of A2A in Foundry
 
@@ -445,7 +793,7 @@ The A2A server wrapper translates between protocols:
 
 ---
 
-## 7. Exposing a Foundry Agent via A2A + Azure APIM
+## 8. Exposing a Foundry Agent via A2A + Azure APIM
 
 This is the complete architecture for exposing a Foundry agent to the outside
 world via A2A, governed and secured by Azure API Management.
@@ -719,7 +1067,7 @@ Body: {
 
 ---
 
-## 8. End-to-End Architecture
+## 9. End-to-End Architecture
 
 Complete view showing both human channels and agent-to-agent communication:
 
