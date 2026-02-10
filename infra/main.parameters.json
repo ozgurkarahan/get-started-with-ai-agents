@@ -130,6 +130,18 @@
     },
     "blobContainerName": {
       "value": "${AZURE_BLOB_CONTAINER_NAME=documents}"
+    },
+    "deployA2AServer": {
+      "value": "${DEPLOY_A2A_SERVER=false}"
+    },
+    "apimServiceName": {
+      "value": "${APIM_SERVICE_NAME}"
+    },
+    "a2aAgentDisplayName": {
+      "value": "${A2A_AGENT_DISPLAY_NAME=AI Foundry Search Agent}"
+    },
+    "a2aServerBaseUrl": {
+      "value": "${A2A_SERVER_BASE_URL}"
     }
   }
 }

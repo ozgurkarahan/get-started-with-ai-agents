@@ -87,6 +87,33 @@ This guide covers:
 - Using agent evaluation for code improvement
 
 
+## Agent-to-Agent (A2A) Channel
+
+This project includes an optional **A2A server** that exposes the Foundry agent to other AI agents via the [A2A protocol](https://a2a-protocol.org/). External agents (Google, LangChain, AWS, Copilot Studio) can discover and invoke the agent through Azure API Management.
+
+```
+External Agent --> APIM (oz-ai-gateway) --> A2A Server --> AI Foundry Agent
+```
+
+### Enable A2A
+
+```bash
+azd env set DEPLOY_A2A_SERVER true
+azd env set APIM_SERVICE_NAME oz-ai-gateway
+azd up
+```
+
+After deployment, import the A2A API in APIM via the Azure Portal. See [docs/ai-foundry-endpoint-and-a2a.md](./docs/ai-foundry-endpoint-and-a2a.md) for full details.
+
+### A2A Endpoints (via APIM)
+
+| Operation | Endpoint |
+|-----------|----------|
+| Agent Card | `GET https://oz-ai-gateway.azure-api.net/{path}/.well-known/agent.json` |
+| Send Task | `POST https://oz-ai-gateway.azure-api.net/{path}/` (method: `tasks/send`) |
+
+All requests require `Ocp-Apim-Subscription-Key` header.
+
 ## Resource Clean-up
 
 To prevent incurring unnecessary charges, it's important to clean up your Azure resources after completing your work with the application.

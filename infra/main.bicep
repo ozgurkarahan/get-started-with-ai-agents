@@ -120,6 +120,18 @@ param otelInstrumentationGenAICaptureMessageContent bool = false
 
 param templateValidationMode bool = false
 
+@description('Deploy the A2A server alongside the main API')
+param deployA2AServer bool = false
+
+@description('Name of the existing APIM instance for A2A governance (e.g. oz-ai-gateway)')
+param apimServiceName string = ''
+
+@description('Display name for the A2A agent in APIM')
+param a2aAgentDisplayName string = 'AI Foundry Search Agent'
+
+@description('Base URL for the A2A server (used in Agent Card). Set after first deployment.')
+param a2aServerBaseUrl string = ''
+
 @description('Random seed to be used during generation of new resources suffixes.')
 param seed string = newGuid()
 
@@ -319,7 +331,99 @@ module api 'api.bicep' = {
   }
 }
 
+// A2A Server
+module a2aServer 'a2a-server.bicep' = if (deployA2AServer) {
+  name: 'a2a-server'
+  scope: rg
+  params: {
+    name: 'ca-a2a-${resourceToken}'
+    location: location
+    tags: tags
+    identityName: '${abbrs.managedIdentityUserAssignedIdentities}a2a-${resourceToken}'
+    containerAppsEnvironmentName: containerApps.outputs.environmentName
+    containerRegistryName: containerApps.outputs.registryName
+    agentID: agentID
+    agentName: agentName
+    projectEndpoint: projectEndpoint
+    enableAzureMonitorTracing: enableAzureMonitorTracing
+    otelInstrumentationGenAICaptureMessageContent: otelInstrumentationGenAICaptureMessageContent
+    a2aServerBaseUrl: a2aServerBaseUrl
+  }
+}
 
+// RBAC for A2A server identity
+module a2aRoleAzureAIDeveloper 'core/security/role.bicep' = if (deployA2AServer) {
+  name: 'a2a-role-azureai-developer-rg'
+  scope: rg
+  params: {
+    principalType: 'ServicePrincipal'
+    principalId: deployA2AServer ? a2aServer.outputs.SERVICE_A2A_IDENTITY_PRINCIPAL_ID : ''
+    roleDefinitionId: '64702f94-c441-49e6-a78b-ef80e0188fee'
+  }
+}
+
+module a2aRoleAzureAIUser 'core/security/role.bicep' = if (deployA2AServer && empty(azureExistingAIProjectResourceId)) {
+  name: 'a2a-role-azure-ai-user-rg'
+  scope: rg
+  params: {
+    principalType: 'ServicePrincipal'
+    principalId: deployA2AServer ? a2aServer.outputs.SERVICE_A2A_IDENTITY_PRINCIPAL_ID : ''
+    roleDefinitionId: '53ca6127-db72-4b80-b1b0-d745d6d5456d'
+  }
+}
+
+module a2aRoleCognitiveServicesUser 'core/security/role.bicep' = if (deployA2AServer && empty(azureExistingAIProjectResourceId)) {
+  name: 'a2a-role-cognitive-services-user-rg'
+  scope: rg
+  params: {
+    principalType: 'ServicePrincipal'
+    principalId: deployA2AServer ? a2aServer.outputs.SERVICE_A2A_IDENTITY_PRINCIPAL_ID : ''
+    roleDefinitionId: 'a97b65f3-24c7-4388-baec-2e87135dc908'
+  }
+}
+
+module a2aRoleCognitiveServicesUserExisting 'core/security/role.bicep' = if (deployA2AServer && !empty(azureExistingAIProjectResourceId)) {
+  name: 'a2a-role-cognitive-services-user-existing-rg'
+  scope: existingProjectRG
+  params: {
+    principalType: 'ServicePrincipal'
+    principalId: deployA2AServer ? a2aServer.outputs.SERVICE_A2A_IDENTITY_PRINCIPAL_ID : ''
+    roleDefinitionId: 'a97b65f3-24c7-4388-baec-2e87135dc908'
+  }
+}
+
+module a2aRoleAzureAIDeveloperExisting 'core/security/role.bicep' = if (deployA2AServer && !empty(azureExistingAIProjectResourceId)) {
+  name: 'a2a-role-azureai-developer-existing-rg'
+  scope: existingProjectRG
+  params: {
+    principalType: 'ServicePrincipal'
+    principalId: deployA2AServer ? a2aServer.outputs.SERVICE_A2A_IDENTITY_PRINCIPAL_ID : ''
+    roleDefinitionId: '64702f94-c441-49e6-a78b-ef80e0188fee'
+  }
+}
+
+// App Insights access for A2A server
+module a2aAppInsightsAccess 'core/security/appinsights-access.bicep' = if (deployA2AServer && !empty(resolvedApplicationInsightsName)) {
+  name: 'a2a-appinsights-access'
+  scope: rg
+  params: {
+    principalType: 'ServicePrincipal'
+    appInsightsName: resolvedApplicationInsightsName
+    principalId: deployA2AServer ? a2aServer.outputs.SERVICE_A2A_IDENTITY_PRINCIPAL_ID : ''
+  }
+}
+
+// APIM configuration for A2A (backend, product, logger)
+module apimConfig 'apim/apim-a2a-api.bicep' = if (deployA2AServer && !empty(apimServiceName)) {
+  name: 'apim-a2a-config'
+  scope: rg
+  params: {
+    apimServiceName: apimServiceName
+    a2aServerUrl: deployA2AServer ? a2aServer.outputs.SERVICE_A2A_URI : ''
+    a2aAgentDisplayName: a2aAgentDisplayName
+    applicationInsightsName: resolvedApplicationInsightsName
+  }
+}
 
 module userRoleAzureAIDeveloper 'core/security/role.bicep' = {
   name: 'user-role-azureai-developer'
@@ -519,3 +623,7 @@ output SERVICE_API_URI string = api.outputs.SERVICE_API_URI
 output SERVICE_API_ENDPOINTS array = ['${api.outputs.SERVICE_API_URI}']
 output SEARCH_CONNECTION_ID string = searchConnectionId_final
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = containerApps.outputs.registryLoginServer
+
+// A2A Server outputs
+output SERVICE_A2A_NAME string = deployA2AServer ? a2aServer.outputs.SERVICE_A2A_NAME : ''
+output SERVICE_A2A_URI string = deployA2AServer ? a2aServer.outputs.SERVICE_A2A_URI : ''
