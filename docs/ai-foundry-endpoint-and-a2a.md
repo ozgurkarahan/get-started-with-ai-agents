@@ -11,6 +11,8 @@
 - [7. Foundry Agent + A2A: Current State](#7-foundry-agent--a2a-current-state)
 - [8. Exposing a Foundry Agent via A2A + Azure APIM](#8-exposing-a-foundry-agent-via-a2a--azure-apim)
 - [9. End-to-End Architecture](#9-end-to-end-architecture)
+- [10. Implementation Details](#10-implementation-details)
+- [11. Connecting APIM as AI Gateway in AI Foundry](#11-connecting-apim-as-ai-gateway-in-ai-foundry)
 - [Sources](#sources)
 
 ---
@@ -285,13 +287,16 @@ Agent Service.
 
 ### Identity & RBAC
 
-The project uses **three managed identities** with specific role assignments:
+The project uses **five managed identities** with specific role assignments:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  AI Services Account Identity (System-Assigned)                  │
-│  Role: Storage Blob Data Contributor                             │
-│  Purpose: Account-level access to blob storage                   │
+│  Principal: 16f8dbdc-61c3-42ff-a3c7-8692833c692e                │
+│  Roles:                                                          │
+│  - Storage Blob Data Contributor (on storage account)            │
+│  - API Management Service Reader (on oz-ai-gateway APIM)         │
+│  Purpose: Account-level access to blob storage + APIM gateway    │
 ├──────────────────────────────────────────────────────────────────┤
 │  AI Project Identity (System-Assigned)                           │
 │  Roles: Storage Blob Data Contributor + Azure AI User            │
@@ -309,6 +314,13 @@ The project uses **three managed identities** with specific role assignments:
 │  - Storage Account Contributor [if search enabled]               │
 │  Purpose: The web app authenticates as this identity to call     │
 │           the AI Foundry Project endpoint via DefaultAzureCredential │
+├──────────────────────────────────────────────────────────────────┤
+│  APIM Identity (System-Assigned)                                 │
+│  Principal: 2537ea5e-881b-4c5f-9e72-5861340170b8                │
+│  Roles:                                                          │
+│  - Cognitive Services User (on aoai-c544zegk5tvc2)               │
+│  Purpose: Allows APIM to call AI Foundry endpoints using         │
+│           managed identity auth (no API keys)                    │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1132,6 +1144,246 @@ Complete view showing both human channels and agent-to-agent communication:
 | A2A inbound (agent receives A2A) | Requires an A2A server wrapper (Semantic Kernel, a2a-sdk, custom) |
 | APIM for A2A governance | Import A2A Agent API in APIM v2 — auto-transforms Agent Card, adds policies, telemetry |
 | Multi-channel | Build channel adapters that all call the same Foundry endpoint |
+
+---
+
+## 10. Implementation Details
+
+This section documents the actual A2A server implementation built for this project.
+
+### File Structure
+
+```
+src/a2a_server/
+  __init__.py               # Package marker
+  main.py                   # Starlette entry point (A2AStarletteApplication)
+  agent_executor.py          # FoundryAgentExecutor - A2A -> Foundry translation
+  foundry_client.py          # FoundryClient - AIProjectClient + OpenAI wrapper
+  agent_card_config.py       # Agent Card definition
+  requirements.txt           # Python dependencies (a2a-sdk, azure SDKs)
+  Dockerfile                 # Container image (python:3.13.9-slim, port 8080)
+```
+
+### Infrastructure (Bicep)
+
+```
+infra/
+  a2a-server.bicep           # Container App module (mirrors api.bicep)
+  apim/
+    apim-a2a-api.bicep       # APIM backend, product, logger
+  main.bicep                 # Updated: new params, A2A module, RBAC, outputs
+```
+
+### Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| A2A SDK | `a2a-sdk[http-server]==0.3.22` | Official SDK, Starlette integration |
+| Stateless | Each A2A task = new Foundry conversation | Simplicity, no session management |
+| Streaming | Disabled in v1 (`capabilities.streaming: false`) | Simpler initial implementation |
+| Identity | Separate user-assigned managed identity | Follows existing api.bicep pattern |
+| Port | 8080 | Distinct from web app (50505) |
+
+### APIM Configuration (Portal)
+
+After deploying the A2A Container App, complete the APIM setup in Azure Portal:
+
+1. Navigate to `oz-ai-gateway` > APIs > + Add API > **A2A Agent**
+2. Enter Agent Card URL: `https://ca-a2a-{token}.{region}.azurecontainerapps.io/.well-known/agent.json`
+3. APIM auto-discovers the agent (name, skills, runtime URL)
+4. Configure policies: rate limiting, JWT validation, telemetry headers
+5. Associate with the `a2a-agents` product
+
+### Deployment Sequence
+
+```bash
+# 1. Enable A2A server
+azd env set DEPLOY_A2A_SERVER true
+azd env set APIM_SERVICE_NAME oz-ai-gateway
+
+# 2. Deploy all infrastructure + apps
+azd up
+
+# 3. Import A2A API in APIM (Portal, manual)
+# 4. Configure APIM policies (Portal, manual)
+```
+
+### Testing
+
+```bash
+# Direct A2A server test
+curl https://ca-a2a-{token}.{region}.azurecontainerapps.io/.well-known/agent.json
+
+# Via APIM
+curl https://oz-ai-gateway.azure-api.net/{path}/.well-known/agent.json \
+  -H "Ocp-Apim-Subscription-Key: <key>"
+```
+
+### Architecture Diagram (with resource names)
+
+```
+External Agent
+    │
+    │  A2A (JSON-RPC 2.0)
+    ▼
+┌──────────────────────────┐
+│  oz-ai-gateway (APIM)    │  BasicV2, swedencentral
+│  Ocp-Apim-Subscription   │
+└──────────┬───────────────┘
+           │
+           ▼
+┌──────────────────────────┐
+│  ca-a2a-{token}          │  Container App, port 8080
+│  A2A Server (Starlette)  │
+│  id-a2a-{token}          │  User-assigned identity
+└──────────┬───────────────┘
+           │  OpenAI API + Azure AD
+           ▼
+┌──────────────────────────┐
+│  ca-api-c544zegk5tvc2    │  Existing Foundry agent
+│  AI Foundry Project      │
+│  aoai-c544zegk5tvc2      │  AI Services account
+└──────────────────────────┘
+```
+
+---
+
+## 11. Connecting APIM as AI Gateway in AI Foundry
+
+To use Azure API Management as an AI Gateway in AI Foundry, APIM must be registered
+as a connected resource on the AI Foundry project. Without this connection, the
+AI Foundry portal reports "no service principal ID" when attempting to add the gateway.
+
+### Prerequisites
+
+| Resource | Status | Details |
+|----------|--------|---------|
+| APIM instance | `oz-ai-gateway` | Must have system-assigned managed identity enabled |
+| APIM identity | `2537ea5e-881b-4c5f-9e72-5861340170b8` | Needs `Cognitive Services User` role on AI Services account |
+| AI Services account | `aoai-c544zegk5tvc2` | Must have system-assigned managed identity enabled |
+| AI Services identity | `16f8dbdc-61c3-42ff-a3c7-8692833c692e` | Needs `API Management Service Reader` role on APIM |
+
+### What Was Configured
+
+#### 1. APIM → AI Services Role Assignment (already existed)
+
+APIM's managed identity was granted `Cognitive Services User` on the AI Services
+account. This allows APIM to forward requests to AI Foundry endpoints using
+managed identity authentication instead of API keys.
+
+```bash
+az role assignment create \
+  --assignee-object-id 2537ea5e-881b-4c5f-9e72-5861340170b8 \
+  --assignee-principal-type ServicePrincipal \
+  --role "Cognitive Services User" \
+  --scope "/subscriptions/44026b8b-9f88-44d9-8f46-0898baa4bcd5/resourceGroups/rg-ai-search-agent/providers/Microsoft.CognitiveServices/accounts/aoai-c544zegk5tvc2"
+```
+
+#### 2. AI Foundry Project Connection (was missing)
+
+The AI Foundry project needs an `ApiManagement` category connection that points
+to the APIM instance and includes its service principal ID. Without this, the
+portal cannot discover the gateway.
+
+Created via REST API:
+
+```bash
+az rest --method PUT \
+  --url "https://management.azure.com/subscriptions/44026b8b-9f88-44d9-8f46-0898baa4bcd5/resourceGroups/rg-ai-search-agent/providers/Microsoft.CognitiveServices/accounts/aoai-c544zegk5tvc2/projects/proj-c544zegk5tvc2/connections/apim-gateway?api-version=2025-06-01" \
+  --body '{
+    "properties": {
+      "authType": "AAD",
+      "category": "ApiManagement",
+      "target": "https://oz-ai-gateway.azure-api.net",
+      "isSharedToAll": true,
+      "metadata": {
+        "ApiType": "Azure",
+        "ResourceId": "/subscriptions/.../providers/Microsoft.ApiManagement/service/oz-ai-gateway",
+        "ServicePrincipalId": "2537ea5e-881b-4c5f-9e72-5861340170b8"
+      }
+    }
+  }'
+```
+
+The key fields:
+- **category**: `ApiManagement` — identifies this as an APIM gateway connection
+- **authType**: `AAD` — uses Entra ID managed identity, not API keys
+- **target**: The APIM gateway URL
+- **ServicePrincipalId**: The APIM managed identity principal — this is what resolves
+  the "no service principal ID" error in the portal
+
+#### 3. AI Services → APIM Role Assignment (was missing)
+
+The AI Services account's managed identity needs read access to the APIM instance
+so AI Foundry can query gateway configuration:
+
+```bash
+az rest --method PUT \
+  --url "https://management.azure.com/.../providers/Microsoft.ApiManagement/service/oz-ai-gateway/providers/Microsoft.Authorization/roleAssignments/{guid}?api-version=2022-04-01" \
+  --body '{
+    "properties": {
+      "roleDefinitionId": "/subscriptions/.../providers/Microsoft.Authorization/roleDefinitions/71522526-b88f-4d52-b57f-d31fc3546d0d",
+      "principalId": "16f8dbdc-61c3-42ff-a3c7-8692833c692e",
+      "principalType": "ServicePrincipal"
+    }
+  }'
+```
+
+Role definition `71522526-b88f-4d52-b57f-d31fc3546d0d` = **API Management Service Reader Role**.
+
+### Connection Topology
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  AI Services Account: aoai-c544zegk5tvc2                          │
+│  Identity: 16f8dbdc-...                                           │
+│                                                                    │
+│  └── Project: proj-c544zegk5tvc2                                  │
+│        │                                                           │
+│        ├── connection: aoai-connection     → Azure OpenAI          │
+│        ├── connection: appinsights-conn    → App Insights          │
+│        ├── connection: storageAccount      → Blob Storage          │
+│        ├── connection: search              → AI Search             │
+│        └── connection: apim-gateway (NEW)  → APIM Gateway          │
+│              category: ApiManagement                                │
+│              target: https://oz-ai-gateway.azure-api.net           │
+│              ServicePrincipalId: 2537ea5e-...                      │
+│                                                                    │
+└───────────────────┬──────────────────────────────────────────────┘
+                    │  API Management Service Reader
+                    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  APIM: oz-ai-gateway                                               │
+│  Identity: 2537ea5e-...                                            │
+│  Gateway: https://oz-ai-gateway.azure-api.net                      │
+│                                                                    │
+└───────────────────┬──────────────────────────────────────────────┘
+                    │  Cognitive Services User
+                    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  AI Services Account: aoai-c544zegk5tvc2                          │
+│  Endpoint: https://aoai-c544zegk5tvc2.cognitiveservices.azure.com │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Verification
+
+List project connections and confirm the APIM gateway appears:
+
+```bash
+az rest --method GET \
+  --url "https://management.azure.com/subscriptions/44026b8b-9f88-44d9-8f46-0898baa4bcd5/resourceGroups/rg-ai-search-agent/providers/Microsoft.CognitiveServices/accounts/aoai-c544zegk5tvc2/projects/proj-c544zegk5tvc2/connections?api-version=2025-06-01" \
+  --query "value[?properties.category=='ApiManagement'].{name:name, target:properties.target, principal:properties.metadata.ServicePrincipalId}" \
+  -o table
+```
+
+Expected output:
+
+```
+Name          Target                                 Principal
+-----------   ------------------------------------   ------------------------------------
+apim-gateway  https://oz-ai-gateway.azure-api.net    2537ea5e-881b-4c5f-9e72-5861340170b8
+```
 
 ---
 
