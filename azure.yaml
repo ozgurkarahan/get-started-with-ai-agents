@@ -39,13 +39,6 @@ services:
     docker:
       image: api_and_frontend
       remoteBuild: true
-  a2a_server:
-    project: ./src/a2a_server
-    language: py
-    host: containerapp
-    docker:
-      image: a2a_server
-      remoteBuild: true
 pipeline:
   variables:
     - AZURE_RESOURCE_GROUP
