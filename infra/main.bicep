@@ -123,12 +123,6 @@ param templateValidationMode bool = false
 @description('Deploy the A2A server alongside the main API')
 param deployA2AServer bool = false
 
-@description('Name of the existing APIM instance for A2A governance (e.g. oz-ai-gateway)')
-param apimServiceName string = ''
-
-@description('Display name for the A2A agent in APIM')
-param a2aAgentDisplayName string = 'AI Foundry Search Agent'
-
 @description('Base URL for the A2A server (used in Agent Card). Set after first deployment.')
 param a2aServerBaseUrl string = ''
 
@@ -414,18 +408,6 @@ module a2aAppInsightsAccess 'core/security/appinsights-access.bicep' = if (deplo
     principalType: 'ServicePrincipal'
     appInsightsName: resolvedApplicationInsightsName
     principalId: deployA2AServer ? a2aServer.outputs.SERVICE_A2A_IDENTITY_PRINCIPAL_ID : ''
-  }
-}
-
-// APIM configuration for A2A (backend, product, logger)
-module apimConfig 'apim/apim-a2a-api.bicep' = if (deployA2AServer && !empty(apimServiceName)) {
-  name: 'apim-a2a-config'
-  scope: rg
-  params: {
-    apimServiceName: apimServiceName
-    a2aServerUrl: deployA2AServer ? a2aServer.outputs.SERVICE_A2A_URI : ''
-    a2aAgentDisplayName: a2aAgentDisplayName
-    applicationInsightsName: resolvedApplicationInsightsName
   }
 }
 

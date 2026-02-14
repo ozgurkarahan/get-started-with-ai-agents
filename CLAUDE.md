@@ -11,14 +11,13 @@ This project deploys a web-based chat application powered by an Azure AI Foundry
 | Web App (FastAPI + React) | `src/api/`, `src/frontend/` | Human-facing chat UI, deployed as Container App on port 50505 |
 | A2A Server | `src/a2a_server/` | Agent-to-Agent protocol wrapper, deployed as Container App on port 8080 |
 | Foundry Agent | Azure AI Foundry | GPT model + file search tools, managed at runtime via SDK |
-| APIM Gateway | `oz-ai-gateway` | API Management for A2A governance (external, portal-configured) |
 | Infrastructure | `infra/` | Bicep IaC for all Azure resources |
 
 ### Request Flows
 
 ```
 Human  --> Web App (FastAPI/SSE) --> Foundry Agent (OpenAI API)
-Agent  --> APIM --> A2A Server (JSON-RPC) --> Foundry Agent (OpenAI API)
+Agent  --> A2A Server (JSON-RPC) --> Foundry Agent (OpenAI API)
 ```
 
 ## Key Files
@@ -32,7 +31,6 @@ Agent  --> APIM --> A2A Server (JSON-RPC) --> Foundry Agent (OpenAI API)
 - `infra/main.bicep` — Top-level orchestrator, all modules and RBAC
 - `infra/api.bicep` — Web app Container App definition
 - `infra/a2a-server.bicep` — A2A server Container App definition
-- `infra/apim/apim-a2a-api.bicep` — APIM backend, product, logger
 - `azure.yaml` — AZD service definitions and hooks
 
 ## Commands
@@ -50,7 +48,6 @@ azd deploy
 ### Deploy with A2A server enabled
 ```bash
 azd env set DEPLOY_A2A_SERVER true
-azd env set APIM_SERVICE_NAME oz-ai-gateway
 azd up
 ```
 
@@ -90,7 +87,6 @@ curl -X POST http://localhost:8080/ \
 | `A2A_SERVER_BASE_URL` | A2A | Public URL for Agent Card |
 | `A2A_SERVER_PORT` | A2A | Server port (default 8080) |
 | `DEPLOY_A2A_SERVER` | Bicep | Toggle A2A server deployment |
-| `APIM_SERVICE_NAME` | Bicep | Existing APIM instance name |
 
 ## Conventions
 
