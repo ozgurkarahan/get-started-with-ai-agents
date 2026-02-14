@@ -145,7 +145,11 @@ var abbrs = loadJsonContent('./abbreviations.json')
 
 var resourceToken = templateValidationMode? toLower(uniqueString(subscription().id, environmentName, location, seed)) :  toLower(uniqueString(subscription().id, environmentName, location))
 
-var tags = { 'azd-env-name': environmentName }
+var tags = {
+  'azd-env-name': environmentName
+  SecurityControl: 'ignore'
+  CostControl: 'ignore'
+}
 
 var tempAgentID = !empty(aiAgentID) ? aiAgentID : ''
 var agentID = !empty(azureExistingAgentId) ? azureExistingAgentId : tempAgentID
